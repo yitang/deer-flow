@@ -24,6 +24,7 @@ class RunStore(abc.ABC):
         assistant_id: str | None = None,
         user_id: str | None = None,
         status: str = "pending",
+        model_name: str | None = None,
         multitask_strategy: str = "reject",
         metadata: dict[str, Any] | None = None,
         kwargs: dict[str, Any] | None = None,

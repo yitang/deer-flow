@@ -194,3 +194,56 @@ class TestRunRepository:
         rows = await repo.list_by_thread("t1", user_id=None)
         assert len(rows) == 2
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_put_stores_model_name(self, tmp_path):
+        """model_name passed to put() is persisted to the database."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", model_name="gpt-4o")
+        row = await repo.get("r1")
+        assert row is not None
+        assert row["model_name"] == "gpt-4o"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_put_model_name_defaults_to_none(self, tmp_path):
+        """When model_name is not passed, it defaults to None."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1")
+        row = await repo.get("r1")
+        assert row is not None
+        assert row["model_name"] is None
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_model_name_preserved_after_status_update(self, tmp_path):
+        """model_name is not lost when status is updated separately."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", model_name="claude-sonnet-4")
+        await repo.update_status("r1", "running")
+        row = await repo.get("r1")
+        assert row["model_name"] == "claude-sonnet-4"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_model_name_preserved_after_completion(self, tmp_path):
+        """model_name is not lost after update_run_completion."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", model_name="gpt-4o")
+        await repo.update_run_completion("r1", status="success", total_tokens=100)
+        row = await repo.get("r1")
+        assert row["model_name"] == "gpt-4o"
+        assert row["total_tokens"] == 100
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_model_name_listed_by_thread(self, tmp_path):
+        """model_name appears in list_by_thread results."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", model_name="gpt-4o")
+        await repo.put("r2", thread_id="t1", model_name="claude-sonnet-4")
+        rows = await repo.list_by_thread("t1")
+        assert len(rows) == 2
+        models = {r["model_name"] for r in rows}
+        assert models == {"gpt-4o", "claude-sonnet-4"}
+        await _cleanup()

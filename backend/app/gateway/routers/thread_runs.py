@@ -60,6 +60,7 @@ class RunResponse(BaseModel):
     run_id: str
     thread_id: str
     assistant_id: str | None = None
+    model_name: str | None = None
     status: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     kwargs: dict[str, Any] = Field(default_factory=dict)
@@ -78,6 +79,7 @@ def _record_to_response(record: RunRecord) -> RunResponse:
         run_id=record.run_id,
         thread_id=record.thread_id,
         assistant_id=record.assistant_id,
+        model_name=record.model_name,
         status=record.status.value,
         metadata=record.metadata,
         kwargs=record.kwargs,

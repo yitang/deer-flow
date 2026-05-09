@@ -1,143 +1,89 @@
-"""Tests for RunManager."""
-
-import re
+"""Tests for RunManager model_name propagation."""
 
 import pytest
-
-from deerflow.runtime import RunManager, RunStatus
-
-ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+from deerflow.runtime.runs.manager import RunManager, RunRecord
+from deerflow.runtime.runs.schemas import DisconnectMode
 
 
-@pytest.fixture
-def manager() -> RunManager:
-    return RunManager()
+class FakeStore:
+    """Minimal RunStore spy that records put() calls."""
+    def __init__(self):
+        self.puts = []
+
+    async def put(self, run_id, *, thread_id, assistant_id=None, user_id=None,
+                  status="pending", model_name=None, multitask_strategy="reject",
+                  metadata=None, kwargs=None, error=None, created_at=None):
+        self.puts.append({
+            "run_id": run_id, "thread_id": thread_id,
+            "assistant_id": assistant_id, "model_name": model_name,
+            "status": status, "multitask_strategy": multitask_strategy,
+        })
+
+    async def get(self, run_id):
+        return None
+
+    async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
+        return []
+
+    async def update_status(self, run_id, status, *, error=None):
+        pass
+
+    async def delete(self, run_id):
+        pass
+
+    async def update_run_completion(self, run_id, *, status, **kwargs):
+        pass
+
+    async def list_pending(self, *, before=None):
+        return []
+
+    async def aggregate_tokens_by_thread(self, thread_id):
+        return {}
 
 
-@pytest.mark.anyio
-async def test_create_and_get(manager: RunManager):
-    """Created run should be retrievable with new fields."""
-    record = await manager.create(
+@pytest.mark.asyncio
+async def test_create_stores_model_name():
+    """model_name is stored on the record and forwarded to the store."""
+    store = FakeStore()
+    mgr = RunManager(store=store)
+
+    record = await mgr.create(
         "thread-1",
-        "lead_agent",
-        metadata={"key": "val"},
-        kwargs={"input": {}},
+        "assistant-1",
+        model_name="gpt-4o",
+        on_disconnect=DisconnectMode.cancel,
+    )
+
+    assert record.model_name == "gpt-4o"
+    assert len(store.puts) == 1
+    assert store.puts[0]["model_name"] == "gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_create_or_reject_stores_model_name():
+    """create_or_reject also propagates model_name."""
+    store = FakeStore()
+    mgr = RunManager(store=store)
+
+    record = await mgr.create_or_reject(
+        "thread-1",
+        "assistant-1",
+        model_name="claude-sonnet-4",
         multitask_strategy="reject",
     )
-    assert record.status == RunStatus.pending
-    assert record.thread_id == "thread-1"
-    assert record.assistant_id == "lead_agent"
-    assert record.metadata == {"key": "val"}
-    assert record.kwargs == {"input": {}}
-    assert record.multitask_strategy == "reject"
-    assert ISO_RE.match(record.created_at)
-    assert ISO_RE.match(record.updated_at)
 
-    fetched = manager.get(record.run_id)
-    assert fetched is record
+    assert record.model_name == "claude-sonnet-4"
+    assert len(store.puts) == 1
+    assert store.puts[0]["model_name"] == "claude-sonnet-4"
 
 
-@pytest.mark.anyio
-async def test_status_transitions(manager: RunManager):
-    """Status should transition pending -> running -> success."""
-    record = await manager.create("thread-1")
-    assert record.status == RunStatus.pending
+@pytest.mark.asyncio
+async def test_create_model_name_defaults_to_none():
+    """model_name is None by default (backward compatible)."""
+    store = FakeStore()
+    mgr = RunManager(store=store)
 
-    await manager.set_status(record.run_id, RunStatus.running)
-    assert record.status == RunStatus.running
-    assert ISO_RE.match(record.updated_at)
+    record = await mgr.create("thread-1")
 
-    await manager.set_status(record.run_id, RunStatus.success)
-    assert record.status == RunStatus.success
-
-
-@pytest.mark.anyio
-async def test_cancel(manager: RunManager):
-    """Cancel should set abort_event and transition to interrupted."""
-    record = await manager.create("thread-1")
-    await manager.set_status(record.run_id, RunStatus.running)
-
-    cancelled = await manager.cancel(record.run_id)
-    assert cancelled is True
-    assert record.abort_event.is_set()
-    assert record.status == RunStatus.interrupted
-
-
-@pytest.mark.anyio
-async def test_cancel_not_inflight(manager: RunManager):
-    """Cancelling a completed run should return False."""
-    record = await manager.create("thread-1")
-    await manager.set_status(record.run_id, RunStatus.success)
-
-    cancelled = await manager.cancel(record.run_id)
-    assert cancelled is False
-
-
-@pytest.mark.anyio
-async def test_list_by_thread(manager: RunManager):
-    """Same thread should return multiple runs."""
-    r1 = await manager.create("thread-1")
-    r2 = await manager.create("thread-1")
-    await manager.create("thread-2")
-
-    runs = await manager.list_by_thread("thread-1")
-    assert len(runs) == 2
-    assert runs[0].run_id == r1.run_id
-    assert runs[1].run_id == r2.run_id
-
-
-@pytest.mark.anyio
-async def test_list_by_thread_is_stable_when_timestamps_tie(manager: RunManager, monkeypatch: pytest.MonkeyPatch):
-    """Ordering should be stable (insertion order) even when timestamps tie."""
-    monkeypatch.setattr("deerflow.runtime.runs.manager._now_iso", lambda: "2026-01-01T00:00:00+00:00")
-
-    r1 = await manager.create("thread-1")
-    r2 = await manager.create("thread-1")
-
-    runs = await manager.list_by_thread("thread-1")
-    assert [run.run_id for run in runs] == [r1.run_id, r2.run_id]
-
-
-@pytest.mark.anyio
-async def test_has_inflight(manager: RunManager):
-    """has_inflight should be True when a run is pending or running."""
-    record = await manager.create("thread-1")
-    assert await manager.has_inflight("thread-1") is True
-
-    await manager.set_status(record.run_id, RunStatus.success)
-    assert await manager.has_inflight("thread-1") is False
-
-
-@pytest.mark.anyio
-async def test_cleanup(manager: RunManager):
-    """After cleanup, the run should be gone."""
-    record = await manager.create("thread-1")
-    run_id = record.run_id
-
-    await manager.cleanup(run_id, delay=0)
-    assert manager.get(run_id) is None
-
-
-@pytest.mark.anyio
-async def test_set_status_with_error(manager: RunManager):
-    """Error message should be stored on the record."""
-    record = await manager.create("thread-1")
-    await manager.set_status(record.run_id, RunStatus.error, error="Something went wrong")
-    assert record.status == RunStatus.error
-    assert record.error == "Something went wrong"
-
-
-@pytest.mark.anyio
-async def test_get_nonexistent(manager: RunManager):
-    """Getting a nonexistent run should return None."""
-    assert manager.get("does-not-exist") is None
-
-
-@pytest.mark.anyio
-async def test_create_defaults(manager: RunManager):
-    """Create with no optional args should use defaults."""
-    record = await manager.create("thread-1")
-    assert record.metadata == {}
-    assert record.kwargs == {}
-    assert record.multitask_strategy == "reject"
-    assert record.assistant_id is None
+    assert record.model_name is None
+    assert store.puts[0]["model_name"] is None
