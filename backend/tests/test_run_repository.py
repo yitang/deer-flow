@@ -194,3 +194,59 @@ class TestRunRepository:
         rows = await repo.list_by_thread("t1", user_id=None)
         assert len(rows) == 2
         await _cleanup()
+
+    # -- model_name persistence --
+
+    @pytest.mark.anyio
+    async def test_put_stores_model_name(self, tmp_path):
+        """put() with model_name=\"gpt-4o\" persists it and get() returns it."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", model_name="gpt-4o")
+        row = await repo.get("r1")
+        assert row is not None
+        assert row["model_name"] == "gpt-4o"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_put_model_name_defaults_to_none(self, tmp_path):
+        """put() without model_name stores None in the database."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1")
+        row = await repo.get("r1")
+        assert row is not None
+        assert row["model_name"] is None
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_groups_by_model(self, tmp_path):
+        """aggregate_tokens_by_thread groups completed runs by model_name."""
+        repo = await _make_repo(tmp_path)
+        # Create completed runs with different model_names
+        await repo.put("r1", thread_id="t1", model_name="gpt-4o")
+        await repo.update_run_completion("r1", status="success", total_tokens=100, total_input_tokens=50, total_output_tokens=50)
+
+        await repo.put("r2", thread_id="t1", model_name="gpt-4o")
+        await repo.update_run_completion("r2", status="success", total_tokens=200, total_input_tokens=100, total_output_tokens=100)
+
+        await repo.put("r3", thread_id="t1", model_name="claude-3")
+        await repo.update_run_completion("r3", status="success", total_tokens=300, total_input_tokens=150, total_output_tokens=150)
+
+        # Pending run (not completed) should be excluded from aggregation
+        await repo.put("r4", thread_id="t1", model_name="gpt-4o", status="pending")
+
+        result = await repo.aggregate_tokens_by_thread("t1")
+
+        assert result["total_runs"] == 3  # only completed runs
+        assert result["total_tokens"] == 600  # 100 + 200 + 300
+        assert result["total_input_tokens"] == 300
+        assert result["total_output_tokens"] == 300
+
+        # Verify by_model grouping
+        assert "gpt-4o" in result["by_model"]
+        assert "claude-3" in result["by_model"]
+        assert result["by_model"]["gpt-4o"]["tokens"] == 300  # 100 + 200
+        assert result["by_model"]["gpt-4o"]["runs"] == 2
+        assert result["by_model"]["claude-3"]["tokens"] == 300
+        assert result["by_model"]["claude-3"]["runs"] == 1
+
+        await _cleanup()

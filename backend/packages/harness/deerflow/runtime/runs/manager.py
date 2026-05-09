@@ -27,6 +27,7 @@ class RunRecord:
     assistant_id: str | None
     status: RunStatus
     on_disconnect: DisconnectMode
+    model_name: str | None = None
     multitask_strategy: str = "reject"
     metadata: dict = field(default_factory=dict)
     kwargs: dict = field(default_factory=dict)
@@ -61,6 +62,7 @@ class RunManager:
                 thread_id=record.thread_id,
                 assistant_id=record.assistant_id,
                 status=record.status.value,
+                model_name=record.model_name,
                 multitask_strategy=record.multitask_strategy,
                 metadata=record.metadata or {},
                 kwargs=record.kwargs or {},
@@ -86,6 +88,7 @@ class RunManager:
         metadata: dict | None = None,
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
+        model_name: str | None = None,
     ) -> RunRecord:
         """Create a new pending run and register it."""
         run_id = str(uuid.uuid4())
@@ -94,6 +97,7 @@ class RunManager:
             run_id=run_id,
             thread_id=thread_id,
             assistant_id=assistant_id,
+            model_name=model_name,
             status=RunStatus.pending,
             on_disconnect=on_disconnect,
             multitask_strategy=multitask_strategy,
@@ -171,6 +175,7 @@ class RunManager:
         metadata: dict | None = None,
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
+        model_name: str | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -214,6 +219,7 @@ class RunManager:
                 run_id=run_id,
                 thread_id=thread_id,
                 assistant_id=assistant_id,
+                model_name=model_name,
                 status=RunStatus.pending,
                 on_disconnect=on_disconnect,
                 multitask_strategy=multitask_strategy,

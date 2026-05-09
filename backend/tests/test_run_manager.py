@@ -1,12 +1,78 @@
 """Tests for RunManager."""
 
 import re
+from unittest.mock import AsyncMock
 
 import pytest
 
 from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime.runs.store.base import RunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
+
+class FakeStore(RunStore):
+    """Spy implementation of RunStore that records put() calls."""
+
+    def __init__(self) -> None:
+        self._put = AsyncMock()
+        self._get = AsyncMock(return_value=None)
+        self._list_by_thread = AsyncMock(return_value=[])
+        self._update_status = AsyncMock()
+        self._delete = AsyncMock()
+        self._update_run_completion = AsyncMock()
+        self._list_pending = AsyncMock(return_value=[])
+        self._aggregate_tokens_by_thread = AsyncMock(return_value={})
+
+    async def put(
+        self,
+        run_id: str,
+        *,
+        thread_id: str,
+        assistant_id: str | None = None,
+        user_id: str | None = None,
+        status: str = "pending",
+        model_name: str | None = None,
+        multitask_strategy: str = "reject",
+        metadata: dict | None = None,
+        kwargs: dict | None = None,
+        error: str | None = None,
+        created_at: str | None = None,
+    ) -> None:
+        return await self._put(
+            run_id,
+            thread_id=thread_id,
+            assistant_id=assistant_id,
+            user_id=user_id,
+            status=status,
+            model_name=model_name,
+            multitask_strategy=multitask_strategy,
+            metadata=metadata,
+            kwargs=kwargs,
+            error=error,
+            created_at=created_at,
+        )
+
+    async def get(self, run_id: str) -> dict | None:
+        return await self._get(run_id)
+
+    async def list_by_thread(self, thread_id: str, *, user_id: str | None = None, limit: int = 100) -> list[dict]:
+        return await self._list_by_thread(thread_id, user_id=user_id, limit=limit)
+
+    async def update_status(self, run_id: str, status: str, *, error: str | None = None) -> None:
+        return await self._update_status(run_id, status, error=error)
+
+    async def delete(self, run_id: str) -> None:
+        return await self._delete(run_id)
+
+    async def update_run_completion(self, run_id: str, **kwargs: object) -> None:
+        return await self._update_run_completion(run_id, **kwargs)
+
+    async def list_pending(self, *, before: str | None = None) -> list[dict]:
+        return await self._list_pending(before=before)
+
+    async def aggregate_tokens_by_thread(self, thread_id: str) -> dict:
+        return await self._aggregate_tokens_by_thread(thread_id)
 
 
 @pytest.fixture
@@ -141,3 +207,73 @@ async def test_create_defaults(manager: RunManager):
     assert record.kwargs == {}
     assert record.multitask_strategy == "reject"
     assert record.assistant_id is None
+
+
+# ---------------------------------------------------------------------------
+# model_name tests — these will fail until RunRecord.model_name is added
+# and RunManager.create() / create_or_reject() accept the model_name param.
+# This is the intended "red" phase of TDD.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_create_stores_model_name():
+    """create() with model_name should set it on RunRecord and pass it to store.put()."""
+    store = FakeStore()
+    manager = RunManager(store=store)
+
+    record = await manager.create(
+        "thread-1",
+        "lead_agent",
+        model_name="gpt-4o",
+        metadata={"key": "val"},
+        kwargs={"input": {}},
+        multitask_strategy="reject",
+    )
+
+    # The record itself must carry model_name
+    assert record.model_name == "gpt-4o"
+
+    # The backing store must have received it
+    store._put.assert_awaited_once()
+    _call_kwargs = store._put.await_args.kwargs
+    assert _call_kwargs.get("model_name") == "gpt-4o"
+    assert _call_kwargs.get("thread_id") == "thread-1"
+    assert _call_kwargs.get("assistant_id") == "lead_agent"
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_stores_model_name():
+    """create_or_reject() with model_name should set it on RunRecord and pass to store.put()."""
+    store = FakeStore()
+    manager = RunManager(store=store)
+
+    record = await manager.create_or_reject(
+        "thread-1",
+        "lead_agent",
+        model_name="claude-sonnet-4",
+        metadata={"key": "val"},
+        kwargs={"input": {}},
+        multitask_strategy="reject",
+    )
+
+    assert record.model_name == "claude-sonnet-4"
+
+    store._put.assert_awaited_once()
+    _call_kwargs = store._put.await_args.kwargs
+    assert _call_kwargs.get("model_name") == "claude-sonnet-4"
+
+
+@pytest.mark.anyio
+async def test_create_model_name_defaults_to_none():
+    """create() without model_name should default to None (backward compat)."""
+    store = FakeStore()
+    manager = RunManager(store=store)
+
+    record = await manager.create("thread-1")
+
+    assert record.model_name is None
+
+    store._put.assert_awaited_once()
+    _call_kwargs = store._put.await_args.kwargs
+    assert _call_kwargs.get("model_name") is None
